@@ -3,10 +3,8 @@ name: LeetCode Analyzer
 # 1. Trigger on all pushes (you can restrict to certain branches or paths if desired)
 on:
   push:
-    # Optionally, uncomment to restrict to 'main' only:
     # branches:
     #   - main
-    # Optionally, only files under 'solves/' directory:
     # paths:
     #   - 'solves/**'
     
@@ -15,19 +13,18 @@ jobs:
     name: Analyze LeetCode solves
     runs-on: ubuntu-latest
     env:
-      # The endpoint of your backend AI analyzer
+      # Your backend endpoint and token, stored as repo secrets
       BACKEND_URL: ${{ secrets.ANALYZER_ENDPOINT }}
-      # (Optional) If your API requires a bearer token:
       BACKEND_TOKEN: ${{ secrets.ANALYZER_TOKEN }}
 
     steps:
-      # 2. Check out the full repository so we can read the changed files
+      # 2. Check out the full repository so we can diff commits
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # fetch full history so git diff works
+          fetch-depth: 0
 
-      # 3. Compute list of changed files between this commit and the previous one
+      # 3. Compute list of changed files between the previous commit and this one
       - name: Determine changed files
         id: changes
         run: |
@@ -35,29 +32,25 @@ jobs:
           files=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} || true)
           echo "Changed files:"
           echo "$files"
-          # Save it as a multi-line output
-          echo "$files" >> changed_files.txt
-          # Set as a workflow output for later steps (comma-separated)
-          echo "::set-output name=list::$(echo "$files" | paste -sd "," -)"
-      
-      # 4. Bail out early if no files changed
+          # Use the new GITHUB_OUTPUT method instead of the deprecated set-output
+          echo "list=$files" >> $GITHUB_OUTPUT
+
+      # 4. Skip if nothing changed
       - name: No changes? Skip
         if: steps.changes.outputs.list == ''
         run: echo "No files changed; nothing to analyze."
 
-      # 5. Send each changed file to the backend
+      # 5. Loop over each changed file and POST it to your backend
       - name: Send changed files to Analyzer
         if: steps.changes.outputs.list != ''
         run: |
-          # Read the file list into an array
           IFS=',' read -r -a files <<< "${{ steps.changes.outputs.list }}"
           
           for file in "${files[@]}"; do
-            # Only send regular files (skip deletions and directories)
             if [[ -f "$file" ]]; then
               echo "→ Sending $file to analyzer..."
               
-              # Prepare metadata JSON
+              # Build metadata JSON
               metadata=$(jq -n \
                 --arg path "$file" \
                 --arg commit "${{ github.sha }}" \
@@ -69,7 +62,7 @@ jobs:
                 }'
               )
               
-              # Use curl to POST multipart: metadata + file contents
+              # POST as multipart/form-data: metadata + file contents
               curl --fail --show-error --silent \
                 -X POST "$BACKEND_URL" \
                 -H "Authorization: Bearer $BACKEND_TOKEN" \
@@ -85,8 +78,7 @@ jobs:
             fi
           done
 
-      # 6. (Optional) Commit any feedback your backend returned,
-      #     or open a PR, etc. This depends on how your backend echoes results.
+      # 6. (Optional) Commit or PR any feedback your backend returns
       # - name: Commit AI feedback
       #   if: ${{ always() }}
       #   run: |

@@ -1,0 +1,97 @@
+name: LeetCode Analyzer
+
+# 1. Trigger on all pushes (you can restrict to certain branches or paths if desired)
+on:
+  push:
+    # Optionally, uncomment to restrict to 'main' only:
+    # branches:
+    #   - main
+    # Optionally, only files under 'solves/' directory:
+    # paths:
+    #   - 'solves/**'
+    
+jobs:
+  analyze:
+    name: Analyze LeetCode solves
+    runs-on: ubuntu-latest
+    env:
+      # The endpoint of your backend AI analyzer
+      BACKEND_URL: ${{ secrets.ANALYZER_ENDPOINT }}
+      # (Optional) If your API requires a bearer token:
+      BACKEND_TOKEN: ${{ secrets.ANALYZER_TOKEN }}
+
+    steps:
+      # 2. Check out the full repository so we can read the changed files
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # fetch full history so git diff works
+
+      # 3. Compute list of changed files between this commit and the previous one
+      - name: Determine changed files
+        id: changes
+        run: |
+          echo "Fetching changed files between ${{ github.event.before }} and ${{ github.sha }}..."
+          files=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} || true)
+          echo "Changed files:"
+          echo "$files"
+          # Save it as a multi-line output
+          echo "$files" >> changed_files.txt
+          # Set as a workflow output for later steps (comma-separated)
+          echo "::set-output name=list::$(echo "$files" | paste -sd "," -)"
+      
+      # 4. Bail out early if no files changed
+      - name: No changes? Skip
+        if: steps.changes.outputs.list == ''
+        run: echo "No files changed; nothing to analyze."
+
+      # 5. Send each changed file to the backend
+      - name: Send changed files to Analyzer
+        if: steps.changes.outputs.list != ''
+        run: |
+          # Read the file list into an array
+          IFS=',' read -r -a files <<< "${{ steps.changes.outputs.list }}"
+          
+          for file in "${files[@]}"; do
+            # Only send regular files (skip deletions and directories)
+            if [[ -f "$file" ]]; then
+              echo "→ Sending $file to analyzer..."
+              
+              # Prepare metadata JSON
+              metadata=$(jq -n \
+                --arg path "$file" \
+                --arg commit "${{ github.sha }}" \
+                --arg repo "${{ github.repository }}" \
+                '{
+                  repository: $repo,
+                  commit: $commit,
+                  path: $path
+                }'
+              )
+              
+              # Use curl to POST multipart: metadata + file contents
+              curl --fail --show-error --silent \
+                -X POST "$BACKEND_URL" \
+                -H "Authorization: Bearer $BACKEND_TOKEN" \
+                -F metadata="$metadata;type=application/json" \
+                -F code="@${file}" \
+                || {
+                  echo "Error: Failed to send $file"; exit 1;
+                }
+              
+              echo "✔️  Sent $file"
+            else
+              echo "Skipping $file (not a regular file)"
+            fi
+          done
+
+      # 6. (Optional) Commit any feedback your backend returned,
+      #     or open a PR, etc. This depends on how your backend echoes results.
+      # - name: Commit AI feedback
+      #   if: ${{ always() }}
+      #   run: |
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git add feedback/
+      #     git commit -m "chore: update AI feedback for ${{ github.sha }}" || echo "No feedback changes"
+      #     git push
